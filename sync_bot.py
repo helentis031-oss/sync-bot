@@ -1,7 +1,6 @@
 import asyncio
 import aiohttp
 import logging
-import json
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -10,63 +9,58 @@ logger = logging.getLogger(__name__)
 TG_TOKEN = "8850239704:AAE-JYmcwNacirQwYdznCpx8QSODSTArTXE"
 MAX_TOKEN = "f9LHodD0cOKFYUeNaCOLwztd4ts_PRktdviwHe9sEoBq7-j3nSXnGnXX3dw1Z-5lF8JnHZcR21OTapc2nfxi"
 
-# Пары групп: TG chat_id -> MAX chat_id и обратно
 GROUPS = [
-    {"tg": -1003669566686, "max": -70934133934771},  # Группа 1
-    {"tg": -1003963499983, "max": -70933950892723},  # Группа 2
-    {"tg": -1003934349337, "max": -70933982612147},  # Группа 3
+    {"tg": -1003669566686,  "max": -70934133934771},  # Воспитатели
+    {"tg": -1003963499983,  "max": -70933950892723},  # Первооткрыватели
+    {"tg": -1003934349337,  "max": -70933982612147},  # Познаватели
 ]
 
 TG_TO_MAX = {g["tg"]: g["max"] for g in GROUPS}
 MAX_TO_TG = {g["max"]: g["tg"] for g in GROUPS}
 
-TG_API = f"https://api.telegram.org/bot{TG_TOKEN}"
+TG_API  = f"https://api.telegram.org/bot{TG_TOKEN}"
 MAX_API = "https://platform-api.max.ru"
-MAX_HEADERS = {"Authorization": MAX_TOKEN}
+MAX_HDR = {"Authorization": MAX_TOKEN, "Content-Type": "application/json"}
 # ====================================================
 
 async def send_to_tg(session, chat_id, text, sender_name):
-    """Отправить сообщение в Telegram"""
     full_text = f"📨 {sender_name} (MAX):\n{text}"
     url = f"{TG_API}/sendMessage"
-    payload = {"chat_id": chat_id, "text": full_text}
     try:
-        async with session.post(url, json=payload) as resp:
+        async with session.post(url, json={"chat_id": chat_id, "text": full_text}) as resp:
             data = await resp.json()
-            if not data.get("ok"):
-                logger.error(f"TG send error: {data}")
-            else:
+            if data.get("ok"):
                 logger.info(f"✅ MAX→TG: {chat_id} | {sender_name}: {text[:50]}")
+            else:
+                logger.error(f"❌ MAX→TG error: {data}")
     except Exception as e:
-        logger.error(f"TG send exception: {e}")
+        logger.error(f"❌ MAX→TG exception: {e}")
 
 async def send_to_max(session, chat_id, text, sender_name):
-    """Отправить сообщение в MAX"""
     full_text = f"📨 {sender_name} (TG):\n{text}"
     url = f"{MAX_API}/messages"
-    payload = {"chat_id": chat_id, "text": full_text}
+    params = {"chat_id": chat_id}
+    payload = {"text": full_text}
     try:
-        async with session.post(url, headers=MAX_HEADERS, json=payload) as resp:
+        async with session.post(url, headers=MAX_HDR, params=params, json=payload) as resp:
             data = await resp.json()
-            if "error" in data:
-                logger.error(f"MAX send error: {data}")
+            if "error" in str(data):
+                logger.error(f"❌ TG→MAX error: {data}")
             else:
                 logger.info(f"✅ TG→MAX: {chat_id} | {sender_name}: {text[:50]}")
     except Exception as e:
-        logger.error(f"MAX send exception: {e}")
+        logger.error(f"❌ TG→MAX exception: {e}")
 
 async def poll_telegram(session):
-    """Получать обновления из Telegram"""
     offset = 0
     logger.info("🔄 Запущен polling Telegram...")
     while True:
         try:
-            url = f"{TG_API}/getUpdates"
             params = {"offset": offset, "timeout": 30, "allowed_updates": ["message"]}
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=35)) as resp:
+            async with session.get(f"{TG_API}/getUpdates", params=params,
+                                   timeout=aiohttp.ClientTimeout(total=35)) as resp:
                 data = await resp.json()
                 if not data.get("ok"):
-                    logger.error(f"TG getUpdates error: {data}")
                     await asyncio.sleep(5)
                     continue
                 for update in data.get("result", []):
@@ -78,19 +72,16 @@ async def poll_telegram(session):
                     text = msg.get("text", "")
                     if not text:
                         continue
-                    # Игнорируем сообщения от ботов
                     if msg.get("from", {}).get("is_bot"):
                         continue
                     sender = msg.get("from", {})
-                    sender_name = sender.get("first_name", "")
+                    name = sender.get("first_name", "")
                     if sender.get("last_name"):
-                        sender_name += f" {sender['last_name']}"
+                        name += f" {sender['last_name']}"
                     if sender.get("username"):
-                        sender_name += f" (@{sender['username']})"
-                    # Пересылаем в MAX если группа в списке
+                        name += f" (@{sender['username']})"
                     if chat_id in TG_TO_MAX:
-                        max_chat_id = TG_TO_MAX[chat_id]
-                        await send_to_max(session, max_chat_id, text, sender_name)
+                        await send_to_max(session, TG_TO_MAX[chat_id], text, name)
         except asyncio.TimeoutError:
             pass
         except Exception as e:
@@ -98,17 +89,15 @@ async def poll_telegram(session):
             await asyncio.sleep(5)
 
 async def poll_max(session):
-    """Получать обновления из MAX"""
     marker = None
     logger.info("🔄 Запущен polling MAX...")
     while True:
         try:
-            url = f"{MAX_API}/updates"
             params = {"timeout": 30}
             if marker:
                 params["marker"] = marker
-            async with session.get(url, headers=MAX_HEADERS, params=params,
-                                   timeout=aiohttp.ClientTimeout(total=35)) as resp:
+            async with session.get(f"{MAX_API}/updates", headers=MAX_HDR,
+                                   params=params, timeout=aiohttp.ClientTimeout(total=35)) as resp:
                 data = await resp.json()
                 marker = data.get("marker", marker)
                 for update in data.get("updates", []):
@@ -119,15 +108,12 @@ async def poll_max(session):
                     text = msg.get("body", {}).get("text", "")
                     if not text or not chat_id:
                         continue
-                    sender = update.get("user") or msg.get("sender", {})
-                    # Игнорируем сообщения от самого бота
+                    sender = msg.get("sender", {})
                     if sender.get("is_bot"):
                         continue
-                    sender_name = sender.get("name") or sender.get("first_name", "Пользователь")
-                    # Пересылаем в TG если группа в списке
+                    name = sender.get("name") or sender.get("first_name", "Пользователь")
                     if chat_id in MAX_TO_TG:
-                        tg_chat_id = MAX_TO_TG[chat_id]
-                        await send_to_tg(session, tg_chat_id, text, sender_name)
+                        await send_to_tg(session, MAX_TO_TG[chat_id], text, name)
         except asyncio.TimeoutError:
             pass
         except Exception as e:
@@ -136,7 +122,6 @@ async def poll_max(session):
 
 async def main():
     logger.info("🚀 Бот синхронизации запущен!")
-    logger.info(f"📊 Синхронизирую {len(GROUPS)} пар групп")
     async with aiohttp.ClientSession() as session:
         await asyncio.gather(
             poll_telegram(session),
